@@ -28,7 +28,7 @@ fn load_config() -> Config {
 const BASE_SET_PORT: i32 = 4296;
 const BASE_HEALTH_PORT: i32 = 10666;
 const BASE_PROM_PORT: i32 = 1234;
-const BASE_DASHBORD_PORT: i32 = 4000;
+const BASE_DASHBOARD_PORT: i32 = 4000;
 
 const DOCKER_COMPOSE_TEMPLATE: &str = r#"
 version: '3.8'
