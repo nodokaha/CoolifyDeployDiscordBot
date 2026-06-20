@@ -1,7 +1,10 @@
 use serde_json::json;
 use serenity::async_trait;
-use serenity::builder::{CreateCommand, CreateInteractionResponse, CreateInteractionResponseMessage};
-use serenity::model::application::{Command, Interaction, ActionRowComponent};
+use serenity::builder::{
+    CreateActionRow, CreateCommand, CreateInteractionResponse, CreateInteractionResponseMessage,
+    CreateSelectMenu, CreateSelectMenuOption, EditInteractionResponse,
+};
+use serenity::model::application::{ActionRowComponent, Command, Interaction};
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
 use std::env;
@@ -131,45 +134,39 @@ impl EventHandler for Handler {
                         if let Ok(apps) = response.json::<serde_json::Value>().await {
                             if let Some(apps_array) = apps.as_array() {
                                 if apps_array.is_empty() {
-                                    let _ = command.edit_response(&ctx.http, CreateInteractionResponseMessage::new().content("❌ 起動できるアプリケーションが見つかりません。")).await;
+                                    let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ 起動できるアプリケーションが見つかりません。")).await;
                                     return;
                                 }
 
-                                let mut options = Vec::new();
+                                let mut select_options = Vec::new();
                                 for app in apps_array.iter().take(25) {
-                                    let name = app["name"].as_str().unwrap_or("Unknown App");
-                                    let uuid = app["uuid"].as_str().unwrap_or("");
-                                    options.push(json!({
-                                        "label": name,
-                                        "value": uuid,
-                                        "description": format!("UUID: {uuid}")
-                                    }));
+                                    let name = app["name"].as_str().unwrap_or("Unknown App").to_string();
+                                    let uuid = app["uuid"].as_str().unwrap_or("").to_string();
+                                    select_options.push(
+                                        CreateSelectMenuOption::new(name, uuid.clone())
+                                            .description(format!("UUID: {uuid}"))
+                                    );
                                 }
 
-                                let menu_component = json!({
-                                    "type": 1,
-                                    "components": [{
-                                        "type": 3,
-                                        "custom_id": "start_select",
-                                        "options": options,
-                                        "placeholder": "起動するサーバーを選択してください"
-                                    }]
-                                });
+                                let menu = CreateSelectMenu::new("start_select", serenity::builder::CreateSelectMenuKind::String { options: select_options })
+                                    .placeholder("起動するサーバーを選択してください");
 
-                                let _ = command.edit_response(&ctx.http, CreateInteractionResponseMessage::new()
+                                let row = CreateActionRow::SelectMenu(menu);
+
+                                let _ = command.edit_response(&ctx.http, EditInteractionResponse::new()
                                     .content("✨ 起動したいBasis Serverを選択してください：")
-                                    .components(serde_json::from_value(json!([menu_component])).unwrap())
+                                    .components(vec![row])
                                 ).await;
                                 return;
                             }
                         }
                     }
-                    let _ = command.edit_response(&ctx.http, CreateInteractionResponseMessage::new().content("❌ アプリケーション一覧の取得に失敗しました。")).await;
+                    let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ アプリケーション一覧の取得に失敗しました。")).await;
                 }
             }
 
             // ==================== 2. モーダル送信時の処理 ====================
-            Interaction::ModalSubmit(modal) => {
+            Interaction::Modal(modal) => {
                 if modal.data.custom_id == "deploy_modal" {
                     modal.defer_ephemeral(&ctx.http).await.unwrap();
 
@@ -239,10 +236,10 @@ impl EventHandler for Handler {
                                  🔹 **DashboardPort:** `{}` (TCP)",
                                 app_name, current_set_port, current_health_port, current_prom_port, current_dashboard_port
                             );
-                            let _ = modal.edit_response(&ctx.http, CreateInteractionResponseMessage::new().content(msg)).await;
+                            let _ = modal.edit_response(&ctx.http, EditInteractionResponse::new().content(msg)).await;
                         }
                         _ => {
-                            let _ = modal.edit_response(&ctx.http, CreateInteractionResponseMessage::new().content("❌ Coolifyへのリソース登録に失敗しました。")).await;
+                            let _ = modal.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ Coolifyへのリソース登録に失敗しました。")).await;
                         }
                     }
                 }
@@ -260,13 +257,13 @@ impl EventHandler for Handler {
 
                             match deploy_res {
                                 Ok(res) if res.status().is_success() => {
-                                    let _ = component.edit_response(&ctx.http, CreateInteractionResponseMessage::new()
+                                    let _ = component.edit_response(&ctx.http, EditInteractionResponse::new()
                                         .content(format!("▶️ **アプリケーション (UUID: `{}`) の起動コマンドを送信しました！**", selected_uuid))
-                                        .components(vec![])
+                                        .components(vec![]) // セレクトメニューを非表示化
                                     ).await;
                                 }
                                 _ => {
-                                    let _ = component.edit_response(&ctx.http, CreateInteractionResponseMessage::new().content("❌ アプリケーションの起動に失敗しました。")).await;
+                                    let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ アプリケーションの起動に失敗しました。")).await;
                                 }
                             }
                         }
