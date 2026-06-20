@@ -30,6 +30,7 @@ fn load_config() -> Config {
 const BASE_SET_PORT: i32 = 4296;
 const BASE_HEALTH_PORT: i32 = 10666;
 const BASE_PROM_PORT: i32 = 1234;
+const BASE_DASHBORD_PORT: i32 = 4000;
 
 const DOCKER_COMPOSE_TEMPLATE: &str = r#"
 version: '3.8'
@@ -50,7 +51,7 @@ services:
       - '${SET_PORT}:${SET_PORT}/udp'
       - '${HEALTH_PORT}:${HEALTH_PORT}/tcp'
       - '${PROM_PORT}:${PROM_PORT}/tcp'
-      - '4000:4000/tcp'
+      - '${DASHBOARD_PORT}:${DASHBOARD_PORT}/tcp'
     volumes:
       - './initialresources:/app/initialresources:ro'
       - './config:/app/config'
@@ -66,6 +67,8 @@ services:
     container_name: dashboard-${SET_PORT}
     restart: unless-stopped
     network_mode: 'service:basis-server'
+    environment:
+      PORT: ${DASHBOARD_PORT}
     depends_on:
       basis-server:
         condition: service_healthy
@@ -187,11 +190,13 @@ impl EventHandler for Handler {
                     let current_set_port = BASE_SET_PORT + offset;
                     let current_health_port = BASE_HEALTH_PORT + offset;
                     let current_prom_port = BASE_PROM_PORT + offset;
+                    let current_dashboard_port = BASE_DASHBOARD_PORT + offset;
 
                     let final_compose = DOCKER_COMPOSE_TEMPLATE
                         .replace("${SET_PORT}", &current_set_port.to_string())
                         .replace("${HEALTH_PORT}", &current_health_port.to_string())
-                        .replace("${PROM_PORT}", &current_prom_port.to_string());
+                        .replace("${PROM_PORT}", &current_prom_port.to_string())
+                        .replace("${DASHBOARD_PORT}", &current_dashboard_port.to_string());
 
                     let app_name = format!("basis-server-{}", current_set_port);
 
