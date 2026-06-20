@@ -324,10 +324,8 @@ impl EventHandler for Handler {
 
 #[tokio::main]
 async fn main() {
-// 環境変数 RUST_LOG が設定されていればそれを使い、なければデフォルトで "info" にする設定
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     // フィルターを適用して初期化
     tracing_subscriber::fmt()
         .with_env_filter(filter)
