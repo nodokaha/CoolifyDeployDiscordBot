@@ -8,9 +8,12 @@ use serenity::model::application::{ActionRowComponent, Command, Interaction, Inp
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
 use std::env;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 
+// tracing のマクロをインポート
 use tracing::{info, warn, error, instrument};
 
+// 設定を保持する構造体
 struct Config {
     coolify_url: String,
     api_token: String,
@@ -19,6 +22,7 @@ struct Config {
     server_uuid: String,
 }
 
+// 起動時に環境変数を一括チェックする関数
 fn load_config() -> Config {
     Config {
         coolify_url: env::var("COOLIFY_URL").expect("環境変数 'COOLIFY_URL' が設定されていません"),
@@ -78,8 +82,9 @@ services:
 
 struct Handler;
 
+// ポートずらし用の既存サービス件数カウント関数 (URLを /services に変更)
 async fn get_port_offset(client: &reqwest::Client, url: &str, auth_header: &str) -> i32 {
-    info!(target: "coolify_api", "Coolifyからアプリケーション一覧を取得中... URL: {}", url);
+    info!(target: "coolify_api", "Coolifyから既存サービス一覧を取得中... URL: {}", url);
     let res = client.get(url).header("Authorization", auth_header).send().await;
     match res {
         Ok(response) => {
@@ -87,16 +92,16 @@ async fn get_port_offset(client: &reqwest::Client, url: &str, auth_header: &str)
             let body_text = response.text().await.unwrap_or_else(|_| "ボディの読み込みに失敗".to_string());
             
             if status.is_success() {
-                if let Ok(apps) = serde_json::from_str::<serde_json::Value>(&body_text) {
-                    if let Some(apps_array) = apps.as_array() {
-                        let count = apps_array.len() as i32;
-                        info!(target: "coolify_api", "アプリケーション数を取得成功: {}件", count);
+                if let Ok(services) = serde_json::from_str::<serde_json::Value>(&body_text) {
+                    if let Some(services_array) = services.as_array() {
+                        let count = services_array.len() as i32;
+                        info!(target: "coolify_api", "サービス数を取得成功: {}件", count);
                         return count;
                     }
                 }
-                warn!(target: "coolify_api", "アプリケーション一覧のJSONパースに失敗しました。生レスポンス: {}", body_text);
+                warn!(target: "coolify_api", "サービス一覧のJSONパースに失敗しました。生データ: {}", body_text);
             } else {
-                error!(target: "coolify_api", "アプリケーション一覧取得失敗。ステータス: {}, レスポンス: {}", status, body_text);
+                error!(target: "coolify_api", "サービス一覧取得失敗。ステータス: {}, レスポンス: {}", status, body_text);
             }
         }
         Err(e) => {
@@ -145,7 +150,8 @@ impl EventHandler for Handler {
                         return;
                     }
 
-                    let url = format!("{}/api/v1/applications", cfg.coolify_url);
+                    // サービス一覧を取得してセレクトメニューを構築
+                    let url = format!("{}/api/v1/services", cfg.coolify_url);
                     let res = client.get(&url).header("Authorization", &auth_header).send().await;
 
                     match res {
@@ -154,18 +160,18 @@ impl EventHandler for Handler {
                             let body_text = response.text().await.unwrap_or_else(|_| "ボディの読み込みに失敗".to_string());
 
                             if status.is_success() {
-                                if let Ok(apps) = serde_json::from_str::<serde_json::Value>(&body_text) {
-                                    if let Some(apps_array) = apps.as_array() {
-                                        if apps_array.is_empty() {
-                                            warn!("起動可能なアプリケーションがCoolify側に0件です。");
-                                            let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ 起動できるアプリケーションが見つかりません。")).await;
+                                if let Ok(services) = serde_json::from_str::<serde_json::Value>(&body_text) {
+                                    if let Some(services_array) = services.as_array() {
+                                        if services_array.is_empty() {
+                                            warn!("起動可能なサービスがCoolify側に0件です。");
+                                            let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ 起動できるサービスが見つかりません。")).await;
                                             return;
                                         }
 
                                         let mut select_options = Vec::new();
-                                        for app in apps_array.iter().take(25) {
-                                            let name = app["name"].as_str().unwrap_or("Unknown App").to_string();
-                                            let uuid = app["uuid"].as_str().unwrap_or("").to_string();
+                                        for service in services_array.iter().take(25) {
+                                            let name = service["name"].as_str().unwrap_or("Unknown Service").to_string();
+                                            let uuid = service["uuid"].as_str().unwrap_or("").to_string();
                                             select_options.push(
                                                 CreateSelectMenuOption::new(name, uuid.clone())
                                                     .description(format!("UUID: {uuid}"))
@@ -173,25 +179,25 @@ impl EventHandler for Handler {
                                         }
 
                                         let menu = CreateSelectMenu::new("start_select", serenity::builder::CreateSelectMenuKind::String { options: select_options })
-                                            .placeholder("起動するサーバーを選択してください");
+                                            .placeholder("起動するサービスを選択してください");
 
                                         let row = CreateActionRow::SelectMenu(menu);
 
                                         let _ = command.edit_response(&ctx.http, EditInteractionResponse::new()
-                                            .content("✨ 起動したいBasis Serverを選択してください：")
+                                            .content("✨ 起動したいBasis Server（サービス）を選択してください：")
                                             .components(vec![row])
                                         ).await;
                                         return;
                                     }
                                 }
-                                error!("アプリケーション一覧のJSONパースに失敗。生データ: {}", body_text);
+                                error!("サービス一覧のJSONパースに失敗。生データ: {}", body_text);
                             } else {
-                                error!("Coolifyからのアプリケーション一覧取得に失敗。ステータス: {}, レスポンス: {}", status, body_text);
+                                error!("Coolifyからのサービス一覧取得に失敗。ステータス: {}, レスポンス: {}", status, body_text);
                             }
                         }
                         Err(e) => error!("Coolifyとの通信に失敗しました: {:?}", e),
                     }
-                    let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ アプリケーション一覧の取得に失敗しました。")).await;
+                    let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ サービス一覧の取得に失敗しました。")).await;
                 }
             }
 
@@ -212,7 +218,7 @@ impl EventHandler for Handler {
                         }
                     }
 
-                    let list_url = format!("{}/api/v1/applications", cfg.coolify_url);
+                    let list_url = format!("{}/api/v1/services", cfg.coolify_url);
                     let offset = get_port_offset(&client, &list_url, &auth_header).await;
                     let current_set_port = BASE_SET_PORT + offset;
                     let current_health_port = BASE_HEALTH_PORT + offset;
@@ -227,20 +233,24 @@ impl EventHandler for Handler {
                         .replace("${PROM_PORT}", &current_prom_port.to_string())
                         .replace("${DASHBOARD_PORT}", &current_dashboard_port.to_string());
 
+                    // 💡 ドキュメント仕様: Docker ComposeのテキストをBase64化
+                    let base64_compose = STANDARD.encode(final_compose.trim());
+
                     let app_name = format!("basis-server-{}", current_set_port);
 
-                    // 🔗 dockercompose エンドポイントへ修正
-                    let create_url = format!("{}/api/v1/applications/dockercompose", cfg.coolify_url);
-                    info!("Coolifyへアプリケーション登録申請送信。URL: {}", create_url);
+                    // ⭕ 最新の /services エンドポイント
+                    let create_url = format!("{}/api/v1/services", cfg.coolify_url);
+                    info!("Coolifyへサービス作成リクエスト送信(Base64化)。URL: {}", create_url);
 
                     let create_res = client.post(&create_url)
                         .header("Authorization", &auth_header)
                         .json(&json!({
-                            "project_uuid": cfg.project_uuid,
-                            "environment_name": cfg.environment_name,
-                            "server_uuid": cfg.server_uuid,
+                            "type": "custom", // カスタムComposeスタックを指定
                             "name": app_name,
-                            "docker_compose": final_compose.trim()
+                            "project_uuid": cfg.project_uuid,
+                            "server_uuid": cfg.server_uuid,
+                            "environment_name": cfg.environment_name,
+                            "docker_compose_raw": base64_compose // Base64データをセット
                         }))
                         .send()
                         .await;
@@ -250,36 +260,39 @@ impl EventHandler for Handler {
                             let status = res.status();
                             let body_text = res.text().await.unwrap_or_else(|_| "ボディの読み込みに失敗".to_string());
 
-                            if status.is_success() {
+                            if status.is_success() || status.as_u16() == 201 {
                                 if let Ok(app_data) = serde_json::from_str::<serde_json::Value>(&body_text) {
-                                    let app_uuid = app_data["uuid"].as_str().unwrap_or_default();
-                                    info!("Coolifyへのアプリケーション登録成功。生成UUID: {}", app_uuid);
+                                    let service_uuid = app_data["uuid"].as_str().unwrap_or_default();
+                                    info!("Coolifyへのサービス登録成功。生成UUID: {}", service_uuid);
 
-                                    // 環境変数の設定
-                                    info!("環境変数 'Password' を登録中...");
-                                    let env_url = format!("{}/api/v1/applications/{}/envs", cfg.coolify_url, app_uuid);
+                                    // ⭕ 環境変数登録のパス修正: /services/{uuid}/envs
+                                    let env_url = format!("{}/api/v1/services/{}/envs", cfg.coolify_url, service_uuid);
+                                    info!("環境変数 'Password' を登録中... URL: {}", env_url);
+                                    
                                     let env_res = client.post(&env_url)
                                         .header("Authorization", &auth_header)
                                         .json(&json!({
                                             "key": "Password",
                                             "value": admin_password,
-                                            "is_build_time": false,
+                                            "is_preview": false,
                                             "is_literal": true
                                         }))
                                         .send()
                                         .await;
                                     
                                     if let Ok(e_res) = env_res {
-                                        info!("環境変数登録ステータス: {}", e_res.status());
+                                        let e_status = e_res.status();
+                                        let e_body = e_res.text().await.unwrap_or_default();
+                                        info!("環境変数登録ステータス: {}, レスポンス: {}", e_status, e_body);
                                     }
 
                                     // デプロイのキック
-                                    info!("デプロイメントを開始します。UUID: {}", app_uuid);
-                                    let deploy_url = format!("{}/api/v1/applications/{}/deploy", cfg.coolify_url, app_uuid);
+                                    info!("サービスのデプロイメントを開始します。UUID: {}", service_uuid);
+                                    let deploy_url = format!("{}/api/v1/services/{}/deploy", cfg.coolify_url, service_uuid);
                                     let _ = client.post(&deploy_url).header("Authorization", &auth_header).send().await;
 
                                     let msg = format!(
-                                        "🚀 **Basis VR Server のデプロイを開始しました！**\n\
+                                        "🚀 **Basis VR Server のデプロイを開始しました！(Services仕様)**\n\
                                          🔹 **設定名称:** `{}`\n\
                                          🔹 **SetPort:** `{}` (UDP)\n\
                                          🔹 **HealthCheckPort:** `{}` (TCP)\n\
@@ -289,16 +302,16 @@ impl EventHandler for Handler {
                                     let _ = modal.edit_response(&ctx.http, EditInteractionResponse::new().content(msg)).await;
                                     return;
                                 }
-                                error!("アプリケーション作成レスポンスのパースに失敗。生データ: {}", body_text);
+                                error!("サービス作成レスポンスのパースに失敗。生データ: {}", body_text);
                             } else {
-                                error!("Coolifyへのリソース登録に失敗。ステータス: {}, レスポンス: {}", status, body_text);
+                                error!("Coolifyへのサービス登録に失敗。ステータス: {}, レスポンス: {}", status, body_text);
                             }
                         }
                         Err(e) => {
-                            error!("Coolifyアプリケーション登録通信時に致命的エラー: {:?}", e);
+                            error!("Coolifyサービス登録通信時に致命的エラー: {:?}", e);
                         }
                     }
-                    let _ = modal.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ Coolifyへのリソース登録に失敗しました。詳細ログを確認してください。")).await;
+                    let _ = modal.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ Coolifyへのサービス登録に失敗しました。詳細ログを確認してください。")).await;
                 }
             }
 
@@ -309,8 +322,10 @@ impl EventHandler for Handler {
                         component.defer_ephemeral(&ctx.http).await.unwrap();
 
                         if let Some(selected_uuid) = values.first() {
-                            info!("セレクトメニューよりサーバー起動リクエストを受信。対象UUID: {}", selected_uuid);
-                            let deploy_url = format!("{}/api/v1/applications/{}/deploy", cfg.coolify_url, selected_uuid);
+                            info!("セレクトメニューよりサービス起動リクエストを受信。対象UUID: {}", selected_uuid);
+                            
+                            // サービスデプロイ用のエンドポイント
+                            let deploy_url = format!("{}/api/v1/services/{}/deploy", cfg.coolify_url, selected_uuid);
                             let deploy_res = client.post(&deploy_url).header("Authorization", &auth_header).send().await;
 
                             match deploy_res {
@@ -319,18 +334,18 @@ impl EventHandler for Handler {
                                     let body_text = res.text().await.unwrap_or_else(|_| "ボディの読み込みに失敗".to_string());
 
                                     if status.is_success() {
-                                        info!("UUID: {} のデプロイ起動コマンド送信成功。", selected_uuid);
+                                        info!("サービス UUID: {} のデプロイ起動コマンド送信成功。", selected_uuid);
                                         let _ = component.edit_response(&ctx.http, EditInteractionResponse::new()
-                                            .content(format!("▶️ **アプリケーション (UUID: `{}`) の起動コマンドを送信しました！**", selected_uuid))
+                                            .content(format!("▶️ **サービス (UUID: `{}`) の起動コマンドを送信しました！**", selected_uuid))
                                             .components(vec![])
                                         ).await;
                                     } else {
-                                        error!("UUID: {} のデプロイ起動に失敗。ステータス: {}, レスポンス: {}", selected_uuid, status, body_text);
-                                        let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ アプリケーションの起動に失敗しました。Coolifyの応答が異常です。")).await;
+                                        error!("サービス UUID: {} の起動に失敗。ステータス: {}, レスポンス: {}", selected_uuid, status, body_text);
+                                        let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ サービスの起動に失敗しました。")).await;
                                     }
                                 }
                                 Err(e) => {
-                                    error!("UUID: {} の起動通信エラー: {:?}", selected_uuid, e);
+                                    error!("サービス UUID: {} の起動通信エラー: {:?}", selected_uuid, e);
                                     let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ 通信エラーにより起動に失敗しました。")).await;
                                 }
                             }
@@ -358,9 +373,11 @@ impl EventHandler for Handler {
 
 #[tokio::main]
 async fn main() {
+    // ログ環境変数のデフォルトフォールバック設定
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
+    // ログトレーサーの初期化
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .init();
