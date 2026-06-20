@@ -1,6 +1,7 @@
 use serde_json::json;
 use serenity::async_trait;
-use serenity::model::application::{Command, Interaction, ActionRowComponent, ComponentType};
+use serenity::builder::{CreateCommand, CreateInteractionResponse, CreateInteractionResponseMessage};
+use serenity::model::application::{Command, Interaction, ActionRowComponent};
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
 use std::env;
@@ -89,7 +90,6 @@ async fn get_port_offset(client: &reqwest::Client, url: &str, auth_header: &str)
 #[async_trait]
 impl EventHandler for Handler {
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        // ハンドラが呼ばれるたびに環境変数をロード（最新の設定を反映可能に）
         let cfg = load_config();
         let client = reqwest::Client::new();
         let auth_header = format!("Bearer {}", cfg.api_token);
@@ -98,7 +98,7 @@ impl EventHandler for Handler {
             // ==================== 1. スラッシュコマンド ====================
             Interaction::Command(command) => {
                 if command.data.name == "deploy" {
-                    let response = json!({
+                    let response_json = json!({
                         "type": 9,
                         "data": {
                             "custom_id": "deploy_modal",
@@ -116,7 +116,9 @@ impl EventHandler for Handler {
                             }]
                         }
                     });
-                    let _ = command.create_response(&ctx.http, serde_json::from_value(response).unwrap()).await;
+                    
+                    let data = serde_json::from_value(response_json).unwrap();
+                    let _ = command.create_response(&ctx.http, data).await;
                 }
                 
                 else if command.data.name == "start" {
@@ -129,7 +131,7 @@ impl EventHandler for Handler {
                         if let Ok(apps) = response.json::<serde_json::Value>().await {
                             if let Some(apps_array) = apps.as_array() {
                                 if apps_array.is_empty() {
-                                    command.edit_response(&ctx.http, |m| m.content("❌ 起動できるアプリケーションが見つかりません。")).await.unwrap();
+                                    let _ = command.edit_response(&ctx.http, CreateInteractionResponseMessage::new().content("❌ 起動できるアプリケーションが見つかりません。")).await;
                                     return;
                                 }
 
@@ -154,18 +156,15 @@ impl EventHandler for Handler {
                                     }]
                                 });
 
-                                command.edit_response(&ctx.http, |m| {
-                                    m.content("✨ 起動したいBasis Serverを選択してください：")
-                                     .components(|c| {
-                                         *c = serde_json::from_value(menu_component).unwrap();
-                                         c
-                                     })
-                                }).await.unwrap();
+                                let _ = command.edit_response(&ctx.http, CreateInteractionResponseMessage::new()
+                                    .content("✨ 起動したいBasis Serverを選択してください：")
+                                    .components(serde_json::from_value(json!([menu_component])).unwrap())
+                                ).await;
                                 return;
                             }
                         }
                     }
-                    command.edit_response(&ctx.http, |m| m.content("❌ アプリケーション一覧の取得に失敗しました。")).await.unwrap();
+                    let _ = command.edit_response(&ctx.http, CreateInteractionResponseMessage::new().content("❌ アプリケーション一覧の取得に失敗しました。")).await;
                 }
             }
 
@@ -236,13 +235,14 @@ impl EventHandler for Handler {
                                  🔹 **設定名称:** `{}`\n\
                                  🔹 **SetPort:** `{}` (UDP)\n\
                                  🔹 **HealthCheckPort:** `{}` (TCP)\n\
-                                 🔹 **PromethusPort:** `{}` (TCP)",
-                                app_name, current_set_port, current_health_port, current_prom_port
+                                 🔹 **PromethusPort:** `{}` (TCP)\n\
+                                 🔹 **DashboardPort:** `{}` (TCP)",
+                                app_name, current_set_port, current_health_port, current_prom_port, current_dashboard_port
                             );
-                            modal.edit_response(&ctx.http, |m| m.content(msg)).await.unwrap();
+                            let _ = modal.edit_response(&ctx.http, CreateInteractionResponseMessage::new().content(msg)).await;
                         }
                         _ => {
-                            modal.edit_response(&ctx.http, |m| m.content("❌ Coolifyへのリソース登録に失敗しました。")).await.unwrap();
+                            let _ = modal.edit_response(&ctx.http, CreateInteractionResponseMessage::new().content("❌ Coolifyへのリソース登録に失敗しました。")).await;
                         }
                     }
                 }
@@ -250,22 +250,24 @@ impl EventHandler for Handler {
 
             // ==================== 3. ドロップダウン選択時 ====================
             Interaction::Component(component) => {
-                if component.data.custom_id == "start_select" && component.data.component_type == ComponentType::StringSelect {
-                    component.defer_ephemeral(&ctx.http).await.unwrap();
+                if component.data.custom_id == "start_select" {
+                    if let serenity::model::application::ComponentInteractionDataKind::StringSelect { values } = &component.data.kind {
+                        component.defer_ephemeral(&ctx.http).await.unwrap();
 
-                    if let Some(selected_uuid) = component.data.values.first() {
-                        let deploy_url = format!("{}/api/v1/applications/{}/deploy", cfg.coolify_url, selected_uuid);
-                        let deploy_res = client.post(&deploy_url).header("Authorization", &auth_header).send().await;
+                        if let Some(selected_uuid) = values.first() {
+                            let deploy_url = format!("{}/api/v1/applications/{}/deploy", cfg.coolify_url, selected_uuid);
+                            let deploy_res = client.post(&deploy_url).header("Authorization", &auth_header).send().await;
 
-                        match deploy_res {
-                            Ok(res) if res.status().is_success() => {
-                                component.edit_response(&ctx.http, |m| {
-                                    m.content(format!("▶️ **アプリケーション (UUID: `{}`) の起動コマンドを送信しました！**", selected_uuid))
-                                     .components(|c| c)
-                                }).await.unwrap();
-                            }
-                            _ => {
-                                component.edit_response(&ctx.http, |m| m.content("❌ アプリケーションの起動に失敗しました。")).await.unwrap();
+                            match deploy_res {
+                                Ok(res) if res.status().is_success() => {
+                                    let _ = component.edit_response(&ctx.http, CreateInteractionResponseMessage::new()
+                                        .content(format!("▶️ **アプリケーション (UUID: `{}`) の起動コマンドを送信しました！**", selected_uuid))
+                                        .components(vec![])
+                                    ).await;
+                                }
+                                _ => {
+                                    let _ = component.edit_response(&ctx.http, CreateInteractionResponseMessage::new().content("❌ アプリケーションの起動に失敗しました。")).await;
+                                }
                             }
                         }
                     }
@@ -278,22 +280,16 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is ready.", ready.user.name);
         
-        let _ = Command::create_global_command(&ctx.http, |command| {
-            command.name("deploy").description("Basis Serverをポート自動スライドで新規デプロイします")
-        }).await;
+        let deploy_cmd = CreateCommand::new("deploy").description("Basis Serverをポート自動スライドで新規デプロイします");
+        let start_cmd = CreateCommand::new("start").description("既存のBasis Serverを選択して起動（再デプロイ）します");
 
-        let _ = Command::create_global_command(&ctx.http, |command| {
-            command.name("start").description("既存のBasis Serverを選択して起動（再デプロイ）します")
-        }).await;
+        let _ = Command::set_global_commands(&ctx.http, vec![deploy_cmd, start_cmd]).await;
     }
 }
 
 #[tokio::main]
 async fn main() {
-    // 起動時にDiscordトークンがなければ即エラー終了
     let token = env::var("DISCORD_BOT_TOKEN").expect("環境変数 'DISCORD_BOT_TOKEN' が設定されていません");
-    
-    // 他のCoolify用環境変数も起動時にチェックしておく
     let _ = load_config();
 
     let intents = GatewayIntents::empty();
