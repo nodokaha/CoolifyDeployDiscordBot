@@ -1,10 +1,10 @@
 use serde_json::json;
 use serenity::async_trait;
 use serenity::builder::{
-    CreateActionRow, CreateCommand, CreateInteractionResponse, CreateInteractionResponseMessage,
+    CreateActionRow, CreateCommand, CreateInteractionResponse, CreateInputText, CreateModal,
     CreateSelectMenu, CreateSelectMenuOption, EditInteractionResponse,
 };
-use serenity::model::application::{ActionRowComponent, Command, Interaction};
+use serenity::model::application::{ActionRowComponent, Command, Interaction, InputTextStyle};
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
 use std::env;
@@ -101,27 +101,22 @@ impl EventHandler for Handler {
             // ==================== 1. スラッシュコマンド ====================
             Interaction::Command(command) => {
                 if command.data.name == "deploy" {
-                    let response_json = json!({
-                        "type": 9,
-                        "data": {
-                            "custom_id": "deploy_modal",
-                            "title": "Basis Server 自動デプロイ設定",
-                            "components": [{
-                                "type": 1,
-                                "components": [{
-                                    "type": 4,
-                                    "custom_id": "admin_password",
-                                    "label": "サーバーのパスワード (ADMIN_PASSWORD)",
-                                    "style": 1,
-                                    "placeholder": "パスワードを入力してください",
-                                    "required": true
-                                }]
-                            }]
-                        }
-                    });
-                    
-                    let data = serde_json::from_value(response_json).unwrap();
-                    let _ = command.create_response(&ctx.http, data).await;
+                    // パスワード入力用のテキストフィールドを作成
+                    let password_input = CreateInputText::new(
+                        InputTextStyle::Short,
+                        "サーバーのパスワード (ADMIN_PASSWORD)",
+                        "admin_password",
+                    )
+                    .placeholder("パスワードを入力してください")
+                    .required(true);
+
+                    // モーダル全体を組み立て
+                    let modal = CreateModal::new("deploy_modal", "Basis Server 自動デプロイ設定")
+                        .components(vec![CreateActionRow::InputText(password_input)]);
+
+                    // モーダルをレスポンスとして送信
+                    let response = CreateInteractionResponse::Modal(modal);
+                    let _ = command.create_response(&ctx.http, response).await;
                 }
                 
                 else if command.data.name == "start" {
