@@ -9,3 +9,5 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serenity = { version = "0.12.5", features = ["client", "gateway", "model", "utils"] }
 tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

@@ -9,6 +9,9 @@ use serenity::model::gateway::Ready;
 use serenity::prelude::*;
 use std::env;
 
+// tracing のマクロをインポート
+use tracing::{info, warn, error, instrument};
+
 // 設定を保持する構造体
 struct Config {
     coolify_url: String,
@@ -79,12 +82,21 @@ services:
 struct Handler;
 
 async fn get_port_offset(client: &reqwest::Client, url: &str, auth_header: &str) -> i32 {
+    info!(target: "coolify_api", "Coolifyからアプリケーション一覧を取得中... URL: {}", url);
     let res = client.get(url).header("Authorization", auth_header).send().await;
-    if let Ok(response) = res {
-        if let Ok(apps) = response.json::<serde_json::Value>().await {
-            if let Some(apps_array) = apps.as_array() {
-                return apps_array.len() as i32;
+    match res {
+        Ok(response) => {
+            if let Ok(apps) = response.json::<serde_json::Value>().await {
+                if let Some(apps_array) = apps.as_array() {
+                    let count = apps_array.len() as i32;
+                    info!(target: "coolify_api", "アプリケーション数を取得成功: {}件", count);
+                    return count;
+                }
             }
+            warn!(target: "coolify_api", "JSONのパース、または配列への変換に失敗しました。");
+        }
+        Err(e) => {
+            error!(target: "coolify_api", "Coolify APIリクエストエラー: {:?}", e);
         }
     }
     0
@@ -92,6 +104,8 @@ async fn get_port_offset(client: &reqwest::Client, url: &str, auth_header: &str)
 
 #[async_trait]
 impl EventHandler for Handler {
+    // #[instrument] をつけることで、この関数内のログに自動的にインタラクションIDなどが付与されます
+    #[instrument(skip(self, ctx, interaction))]
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         let cfg = load_config();
         let client = reqwest::Client::new();
@@ -100,8 +114,11 @@ impl EventHandler for Handler {
         match interaction {
             // ==================== 1. スラッシュコマンド ====================
             Interaction::Command(command) => {
-                if command.data.name == "deploy" {
-                    // パスワード入力用のテキストフィールドを作成
+                let user_name = &command.user.name;
+                let command_name = &command.data.name;
+                info!("コマンド実行: /{} (実行者: {})", command_name, user_name);
+
+                if command_name == "deploy" {
                     let password_input = CreateInputText::new(
                         InputTextStyle::Short,
                         "サーバーのパスワード (ADMIN_PASSWORD)",
@@ -110,17 +127,20 @@ impl EventHandler for Handler {
                     .placeholder("パスワードを入力してください")
                     .required(true);
 
-                    // モーダル全体を組み立て
                     let modal = CreateModal::new("deploy_modal", "Basis Server 自動デプロイ設定")
                         .components(vec![CreateActionRow::InputText(password_input)]);
 
-                    // モーダルをレスポンスとして送信
                     let response = CreateInteractionResponse::Modal(modal);
-                    let _ = command.create_response(&ctx.http, response).await;
+                    if let Err(e) = command.create_response(&ctx.http, response).await {
+                        error!("モーダル送信エラー: {:?}", e);
+                    }
                 }
                 
-                else if command.data.name == "start" {
-                    command.defer_ephemeral(&ctx.http).await.unwrap();
+                else if command_name == "start" {
+                    if let Err(e) = command.defer_ephemeral(&ctx.http).await {
+                        error!("defer_ephemeral エラー: {:?}", e);
+                        return;
+                    }
 
                     let url = format!("{}/api/v1/applications", cfg.coolify_url);
                     let res = client.get(&url).header("Authorization", &auth_header).send().await;
@@ -129,6 +149,7 @@ impl EventHandler for Handler {
                         if let Ok(apps) = response.json::<serde_json::Value>().await {
                             if let Some(apps_array) = apps.as_array() {
                                 if apps_array.is_empty() {
+                                    warn!("起動可能なアプリケーションがCoolify側に0件です。");
                                     let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ 起動できるアプリケーションが見つかりません。")).await;
                                     return;
                                 }
@@ -148,20 +169,26 @@ impl EventHandler for Handler {
 
                                 let row = CreateActionRow::SelectMenu(menu);
 
-                                let _ = command.edit_response(&ctx.http, EditInteractionResponse::new()
+                                if let Err(e) = command.edit_response(&ctx.http, EditInteractionResponse::new()
                                     .content("✨ 起動したいBasis Serverを選択してください：")
                                     .components(vec![row])
-                                ).await;
+                                ).await {
+                                    error!("セレクトメニュー送信エラー: {:?}", e);
+                                }
                                 return;
                             }
                         }
                     }
+                    error!("Coolifyからのアプリケーション一覧取得、またはパースに失敗しました。");
                     let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ アプリケーション一覧の取得に失敗しました。")).await;
                 }
             }
 
             // ==================== 2. モーダル送信時の処理 ====================
             Interaction::Modal(modal) => {
+                let user_name = &modal.user.name;
+                info!("モーダル送信を受信: custom_id={} (送信者: {})", modal.data.custom_id, user_name);
+
                 if modal.data.custom_id == "deploy_modal" {
                     modal.defer_ephemeral(&ctx.http).await.unwrap();
 
@@ -181,6 +208,8 @@ impl EventHandler for Handler {
                     let current_prom_port = BASE_PROM_PORT + offset;
                     let current_dashboard_port = BASE_DASHBOARD_PORT + offset;
 
+                    info!("新規割り当てポート計算完了 -> SET: {}, HEALTH: {}, DASHBOARD: {}", current_set_port, current_health_port, current_dashboard_port);
+
                     let final_compose = DOCKER_COMPOSE_TEMPLATE
                         .replace("${SET_PORT}", &current_set_port.to_string())
                         .replace("${HEALTH_PORT}", &current_health_port.to_string())
@@ -189,6 +218,7 @@ impl EventHandler for Handler {
 
                     let app_name = format!("basis-server-{}", current_set_port);
 
+                    info!("Coolifyへアプリケーション登録リクエスト送信開始。名前: {}", app_name);
                     let create_url = format!("{}/api/v1/applications/docker-compose", cfg.coolify_url);
                     let create_res = client.post(&create_url)
                         .header("Authorization", &auth_header)
@@ -206,7 +236,10 @@ impl EventHandler for Handler {
                         Ok(res) if res.status().is_success() => {
                             let app_data: serde_json::Value = res.json().await.unwrap_or(json!({}));
                             let app_uuid = app_data["uuid"].as_str().unwrap_or_default();
+                            info!("Coolifyへのアプリケーション登録成功。生成されたUUID: {}", app_uuid);
 
+                            // 環境変数の設定
+                            info!("環境変数 'Password' を登録中...");
                             let env_url = format!("{}/api/v1/applications/{}/envs", cfg.coolify_url, app_uuid);
                             let _ = client.post(&env_url)
                                 .header("Authorization", &auth_header)
@@ -219,6 +252,8 @@ impl EventHandler for Handler {
                                 .send()
                                 .await;
 
+                            // デプロイのキック
+                            info!("デプロイメントをキックします。UUID: {}", app_uuid);
                             let deploy_url = format!("{}/api/v1/applications/{}/deploy", cfg.coolify_url, app_uuid);
                             let _ = client.post(&deploy_url).header("Authorization", &auth_header).send().await;
 
@@ -233,7 +268,8 @@ impl EventHandler for Handler {
                             );
                             let _ = modal.edit_response(&ctx.http, EditInteractionResponse::new().content(msg)).await;
                         }
-                        _ => {
+                        other => {
+                            error!("Coolifyへのアプリケーション登録に失敗しました。レスポンス: {:?}", other);
                             let _ = modal.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ Coolifyへのリソース登録に失敗しました。")).await;
                         }
                     }
@@ -247,17 +283,20 @@ impl EventHandler for Handler {
                         component.defer_ephemeral(&ctx.http).await.unwrap();
 
                         if let Some(selected_uuid) = values.first() {
+                            info!("セレクトメニューよりサーバー起動リクエストを受信。対象UUID: {}", selected_uuid);
                             let deploy_url = format!("{}/api/v1/applications/{}/deploy", cfg.coolify_url, selected_uuid);
                             let deploy_res = client.post(&deploy_url).header("Authorization", &auth_header).send().await;
 
                             match deploy_res {
                                 Ok(res) if res.status().is_success() => {
+                                    info!("UUID: {} の再デプロイコマンド送信に成功しました。", selected_uuid);
                                     let _ = component.edit_response(&ctx.http, EditInteractionResponse::new()
                                         .content(format!("▶️ **アプリケーション (UUID: `{}`) の起動コマンドを送信しました！**", selected_uuid))
-                                        .components(vec![]) // セレクトメニューを非表示化
+                                        .components(vec![]) 
                                     ).await;
                                 }
-                                _ => {
+                                other => {
+                                    error!("UUID: {} の起動に失敗しました。原因: {:?}", selected_uuid, other);
                                     let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ アプリケーションの起動に失敗しました。")).await;
                                 }
                             }
@@ -270,21 +309,37 @@ impl EventHandler for Handler {
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
-        println!("{} is ready.", ready.user.name);
+        info!("Botが正常に起動しました！ログイン名: {}", ready.user.name);
         
         let deploy_cmd = CreateCommand::new("deploy").description("Basis Serverをポート自動スライドで新規デプロイします");
         let start_cmd = CreateCommand::new("start").description("既存のBasis Serverを選択して起動（再デプロイ）します");
 
-        let _ = Command::set_global_commands(&ctx.http, vec![deploy_cmd, start_cmd]).await;
+        info!("グローバルスラッシュコマンドを登録中...");
+        match Command::set_global_commands(&ctx.http, vec![deploy_cmd, start_cmd]).await {
+            Ok(_) => info!("グローバルスラッシュコマンドの登録に成功しました。"),
+            Err(e) => error!("グローバルスラッシュコマンドの登録に失敗しました: {:?}", e),
+        }
     }
 }
 
 #[tokio::main]
 async fn main() {
+    // 💡 ログ出力の初期化 (環境変数 RUST_LOG が未設定ならデフォルトで info レベルを出力)
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", "info");
+    }
+    tracing_subscriber::fmt::init();
+
+    info!("Botの初期化を開始します...");
+
     let token = env::var("DISCORD_BOT_TOKEN").expect("環境変数 'DISCORD_BOT_TOKEN' が設定されていません");
     let _ = load_config();
 
     let intents = GatewayIntents::empty();
     let mut client = Client::builder(&token, intents).event_handler(Handler).await.expect("Err");
-    if let Err(why) = client.start().await { println!("Error: {:?}", why); }
+    
+    info!("Discordゲートウェイに接続しています...");
+    if let Err(why) = client.start().await { 
+        error!("Botの実行中にエラーが発生しました: {:?}", why); 
+    }
 }
