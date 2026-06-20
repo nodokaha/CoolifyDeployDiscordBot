@@ -12,7 +12,6 @@ struct Config {
     project_uuid: String,
     environment_name: String,
     server_uuid: String,
-    destination_uuid: String,
 }
 
 // 起動時に環境変数を一括チェックする関数
@@ -23,7 +22,6 @@ fn load_config() -> Config {
         project_uuid: env::var("COOLIFY_PROJECT_UUID").expect("環境変数 'COOLIFY_PROJECT_UUID' が設定されていません"),
         environment_name: env::var("COOLIFY_ENVIRONMENT_NAME").unwrap_or_else(|_| "production".to_string()),
         server_uuid: env::var("COOLIFY_SERVER_UUID").expect("環境変数 'COOLIFY_SERVER_UUID' が設定されていません"),
-        destination_uuid: env::var("COOLIFY_DESTINATION_UUID").expect("環境変数 'COOLIFY_DESTINATION_UUID' が設定されていません"),
     }
 }
 
@@ -207,7 +205,6 @@ impl EventHandler for Handler {
                             "project_uuid": cfg.project_uuid,
                             "environment_name": cfg.environment_name,
                             "server_uuid": cfg.server_uuid,
-                            "destination_uuid": cfg.destination_uuid,
                             "name": app_name,
                             "docker_compose": final_compose.trim()
                         }))
