@@ -82,7 +82,7 @@ services:
 
 struct Handler;
 
-// ポートずらし用の既存サービス件数カウント関数 (URLを /services に変更)
+// ポートずらし用に既存のサービス件数をカウントする関数
 async fn get_port_offset(client: &reqwest::Client, url: &str, auth_header: &str) -> i32 {
     info!(target: "coolify_api", "Coolifyから既存サービス一覧を取得中... URL: {}", url);
     let res = client.get(url).header("Authorization", auth_header).send().await;
@@ -150,7 +150,7 @@ impl EventHandler for Handler {
                         return;
                     }
 
-                    // サービス一覧を取得してセレクトメニューを構築
+                    // サービス一覧（/services）を取得して選択肢を構築
                     let url = format!("{}/api/v1/services", cfg.coolify_url);
                     let res = client.get(&url).header("Authorization", &auth_header).send().await;
 
@@ -201,7 +201,7 @@ impl EventHandler for Handler {
                 }
             }
 
-            // ==================== 2. モーダル送信時の処理 ====================
+            // ==================== 2. モーダル送信時の処理 (新規デプロイ) ====================
             Interaction::Modal(modal) => {
                 let user_name = &modal.user.name;
                 info!("モーダル送信を受信: custom_id={} (送信者: {})", modal.data.custom_id, user_name);
@@ -233,24 +233,23 @@ impl EventHandler for Handler {
                         .replace("${PROM_PORT}", &current_prom_port.to_string())
                         .replace("${DASHBOARD_PORT}", &current_dashboard_port.to_string());
 
-                    // 💡 ドキュメント仕様: Docker ComposeのテキストをBase64化
+                    // Docker ComposeのテキストをBase64化
                     let base64_compose = STANDARD.encode(final_compose.trim());
 
                     let app_name = format!("basis-server-{}", current_set_port);
 
-                    // ⭕ 最新の /services エンドポイント
                     let create_url = format!("{}/api/v1/services", cfg.coolify_url);
                     info!("Coolifyへサービス作成リクエスト送信(Base64化)。URL: {}", create_url);
 
                     let create_res = client.post(&create_url)
                         .header("Authorization", &auth_header)
                         .json(&json!({
-                            "type": "custom", // カスタムComposeスタックを指定
+                            "type": "custom", 
                             "name": app_name,
                             "project_uuid": cfg.project_uuid,
                             "server_uuid": cfg.server_uuid,
                             "environment_name": cfg.environment_name,
-                            "docker_compose_raw": base64_compose // Base64データをセット
+                            "docker_compose_raw": base64_compose 
                         }))
                         .send()
                         .await;
@@ -265,7 +264,7 @@ impl EventHandler for Handler {
                                     let service_uuid = app_data["uuid"].as_str().unwrap_or_default();
                                     info!("Coolifyへのサービス登録成功。生成UUID: {}", service_uuid);
 
-                                    // ⭕ 環境変数登録のパス修正: /services/{uuid}/envs
+                                    // 環境変数登録のパス: /services/{uuid}/envs
                                     let env_url = format!("{}/api/v1/services/{}/envs", cfg.coolify_url, service_uuid);
                                     info!("環境変数 'Password' を登録中... URL: {}", env_url);
                                     
@@ -286,7 +285,7 @@ impl EventHandler for Handler {
                                         info!("環境変数登録ステータス: {}, レスポンス: {}", e_status, e_body);
                                     }
 
-                                    // デプロイのキック
+                                    // 初期デプロイをキック
                                     info!("サービスのデプロイメントを開始します。UUID: {}", service_uuid);
                                     let deploy_url = format!("{}/api/v1/services/{}/deploy", cfg.coolify_url, service_uuid);
                                     let _ = client.post(&deploy_url).header("Authorization", &auth_header).send().await;
@@ -315,7 +314,7 @@ impl EventHandler for Handler {
                 }
             }
 
-            // ==================== 3. ドロップダウン選択時 ====================
+            // ==================== 3. ドロップダウン選択時の処理 (スタート実行) ====================
             Interaction::Component(component) => {
                 if component.data.custom_id == "start_select" {
                     if let serenity::model::application::ComponentInteractionDataKind::StringSelect { values } = &component.data.kind {
@@ -324,24 +323,26 @@ impl EventHandler for Handler {
                         if let Some(selected_uuid) = values.first() {
                             info!("セレクトメニューよりサービス起動リクエストを受信。対象UUID: {}", selected_uuid);
                             
-                            // サービスデプロイ用のエンドポイント
-                            let deploy_url = format!("{}/api/v1/services/{}/deploy", cfg.coolify_url, selected_uuid);
-                            let deploy_res = client.post(&deploy_url).header("Authorization", &auth_header).send().await;
+                            // ⭕ 最新公式ドキュメント仕様の通り、/start に対して GET リクエストを送信
+                            let start_url = format!("{}/api/v1/services/{}/start", cfg.coolify_url, selected_uuid);
+                            info!("Coolifyへサービス起動リクエスト(GET)送信。URL: {}", start_url);
+                            
+                            let start_res = client.get(&start_url).header("Authorization", &auth_header).send().await;
 
-                            match deploy_res {
+                            match start_res {
                                 Ok(res) => {
                                     let status = res.status();
                                     let body_text = res.text().await.unwrap_or_else(|_| "ボディの読み込みに失敗".to_string());
 
                                     if status.is_success() {
-                                        info!("サービス UUID: {} のデプロイ起動コマンド送信成功。", selected_uuid);
+                                        info!("サービス UUID: {} の起動リクエスト送信成功。レスポンス: {}", selected_uuid, body_text);
                                         let _ = component.edit_response(&ctx.http, EditInteractionResponse::new()
-                                            .content(format!("▶️ **サービス (UUID: `{}`) の起動コマンドを送信しました！**", selected_uuid))
+                                            .content(format!("▶️ **サービス (UUID: `{}`) の起動リクエストを受理しました！ (タスクがキューに追加されました)**", selected_uuid))
                                             .components(vec![])
                                         ).await;
                                     } else {
                                         error!("サービス UUID: {} の起動に失敗。ステータス: {}, レスポンス: {}", selected_uuid, status, body_text);
-                                        let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ サービスの起動に失敗しました。")).await;
+                                        let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ サービスの起動に失敗しました。Coolify側のログを確認してください。")).await;
                                     }
                                 }
                                 Err(e) => {
@@ -361,7 +362,7 @@ impl EventHandler for Handler {
         info!("Botが正常に起動しました！ログイン名: {}", ready.user.name);
         
         let deploy_cmd = CreateCommand::new("deploy").description("Basis Serverをポート自動スライドで新規デプロイします");
-        let start_cmd = CreateCommand::new("start").description("既存のBasis Serverを選択して起動（再デプロイ）します");
+        let start_cmd = CreateCommand::new("start").description("既存のBasis Serverを選択して起動（スタート）します");
 
         info!("グローバルスラッシュコマンドを登録中...");
         match Command::set_global_commands(&ctx.http, vec![deploy_cmd, start_cmd]).await {
@@ -373,7 +374,7 @@ impl EventHandler for Handler {
 
 #[tokio::main]
 async fn main() {
-    // ログ環境変数のデフォルトフォールバック設定
+    // ログ環境変数のデフォルトフォールバック設定 (unsafe 回避)
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
