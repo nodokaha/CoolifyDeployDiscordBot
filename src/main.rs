@@ -244,7 +244,6 @@ impl EventHandler for Handler {
                     let create_res = client.post(&create_url)
                         .header("Authorization", &auth_header)
                         .json(&json!({
-                            "type": "custom", 
                             "name": app_name,
                             "project_uuid": cfg.project_uuid,
                             "server_uuid": cfg.server_uuid,
