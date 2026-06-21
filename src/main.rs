@@ -73,6 +73,7 @@ services:
     network_mode: 'service:basis-server'
     environment:
       PORT: ${DASHBOARD_PORT}
+      HEALTH_PORT: ${HEALTH_PORT}
     depends_on:
       basis-server:
         condition: service_healthy
@@ -106,6 +107,43 @@ async fn get_port_offset(client: &reqwest::Client, url: &str, auth_header: &str)
         }
     }
     0
+}
+
+async fn generate_service_select(client: &reqwest::Client, url: &str, auth_header: &str, custom_id: &str, placeholder: &str) -> Result<CreateActionRow, String> {
+    let res = client.get(url).header("Authorization", auth_header).send().await;
+    match res {
+        Ok(response) => {
+            let status = response.status();
+            let body_text = response.text().await.unwrap_or_else(|_| "ボディの読み込みに失敗".to_string());
+
+            if status.is_success() {
+                if let Ok(services) = serde_json::from_str::<serde_json::Value>(&body_text) {
+                    if let Some(services_array) = services.as_array() {
+                        if services_array.is_empty() {
+                            return Err("❌ 対象となるサービスがCoolify側に0件です。".to_string());
+                        }
+
+                        let mut select_options = Vec::new();
+                        for service in services_array.iter().take(25) {
+                            let name = service["name"].as_str().unwrap_or("Unknown Service").to_string();
+                            let uuid = service["uuid"].as_str().unwrap_or("").to_string();
+                            select_options.push(
+                                CreateSelectMenuOption::new(name, uuid.clone())
+                                    .description(format!("UUID: {uuid}"))
+                            );
+                        }
+
+                        let menu = CreateSelectMenu::new(custom_id, serenity::builder::CreateSelectMenuKind::String { options: select_options })
+                            .placeholder(placeholder);
+
+                        return Ok(CreateActionRow::SelectMenu(menu));
+                    }
+                }
+            }
+            return Err(format!("❌ サービス一覧の解析に失敗。ステータス: {}", status));
+        }
+        Err(_) => Err("❌ Coolifyとの通信に失敗しました。".to_string()),
+    }
 }
 
 #[async_trait]
@@ -145,54 +183,56 @@ impl EventHandler for Handler {
                         error!("defer_ephemeral エラー: {:?}", e);
                         return;
                     }
-
                     let url = format!("{}/api/v1/services", cfg.coolify_url);
-                    let res = client.get(&url).header("Authorization", &auth_header).send().await;
-
-                    match res {
-                        Ok(response) => {
-                            let status = response.status();
-                            let body_text = response.text().await.unwrap_or_else(|_| "ボディの読み込みに失敗".to_string());
-
-                            if status.is_success() {
-                                if let Ok(services) = serde_json::from_str::<serde_json::Value>(&body_text) {
-                                    if let Some(services_array) = services.as_array() {
-                                        if services_array.is_empty() {
-                                            warn!("起動可能なサービスがCoolify側に0件です。");
-                                            let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ 起動できるサービスが見つかりません。")).await;
-                                            return;
-                                        }
-
-                                        let mut select_options = Vec::new();
-                                        for service in services_array.iter().take(25) {
-                                            let name = service["name"].as_str().unwrap_or("Unknown Service").to_string();
-                                            let uuid = service["uuid"].as_str().unwrap_or("").to_string();
-                                            select_options.push(
-                                                CreateSelectMenuOption::new(name, uuid.clone())
-                                                    .description(format!("UUID: {uuid}"))
-                                            );
-                                        }
-
-                                        let menu = CreateSelectMenu::new("start_select", serenity::builder::CreateSelectMenuKind::String { options: select_options })
-                                            .placeholder("起動するサービスを選択してください");
-
-                                        let row = CreateActionRow::SelectMenu(menu);
-
-                                        let _ = command.edit_response(&ctx.http, EditInteractionResponse::new()
-                                            .content("✨ 起動したいBasis Server（サービス）を選択してください：")
-                                            .components(vec![row])
-                                        ).await;
-                                        return;
-                                    }
-                                }
-                                error!("サービス一覧のJSONパースに失敗。生データ: {}", body_text);
-                            } else {
-                                error!("Coolifyからのサービス一覧取得に失敗。ステータス: {}, レスポンス: {}", status, body_text);
-                            }
+                    match generate_service_select(&client, &url, &auth_header, "start_select", "起動するサービスを選択してください").await {
+                        Ok(row) => {
+                            let _ = command.edit_response(&ctx.http, EditInteractionResponse::new()
+                                .content("✨ 起動したいBasis Server（サービス）を選択してください：")
+                                .components(vec![row])
+                            ).await;
                         }
-                        Err(e) => error!("Coolifyとの通信に失敗しました: {:?}", e),
+                        Err(err_msg) => {
+                            let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content(err_msg)).await;
+                        }
                     }
-                    let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ サービス一覧の取得に失敗しました。")).await;
+                }
+
+                else if command_name == "stop" {
+                    if let Err(e) = command.defer_ephemeral(&ctx.http).await {
+                        error!("defer_ephemeral エラー: {:?}", e);
+                        return;
+                    }
+                    let url = format!("{}/api/v1/services", cfg.coolify_url);
+                    match generate_service_select(&client, &url, &auth_header, "stop_select", "停止するサービスを選択してください").await {
+                        Ok(row) => {
+                            let _ = command.edit_response(&ctx.http, EditInteractionResponse::new()
+                                .content("🛑 停止したいBasis Server（サービス）を選択してください：")
+                                .components(vec![row])
+                            ).await;
+                        }
+                        Err(err_msg) => {
+                            let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content(err_msg)).await;
+                        }
+                    }
+                }
+
+                else if command_name == "delete" {
+                    if let Err(e) = command.defer_ephemeral(&ctx.http).await {
+                        error!("defer_ephemeral エラー: {:?}", e);
+                        return;
+                    }
+                    let url = format!("{}/api/v1/services", cfg.coolify_url);
+                    match generate_service_select(&client, &url, &auth_header, "delete_select", "削除するサービスを選択してください").await {
+                        Ok(row) => {
+                            let _ = command.edit_response(&ctx.http, EditInteractionResponse::new()
+                                .content("⚠️ **削除したいBasis Server（サービス）を選択してください（警告: この操作は取り消せません）**：")
+                                .components(vec![row])
+                            ).await;
+                        }
+                        Err(err_msg) => {
+                            let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content(err_msg)).await;
+                        }
+                    }
                 }
             }
 
@@ -304,38 +344,68 @@ impl EventHandler for Handler {
             }
 
             Interaction::Component(component) => {
-                if component.data.custom_id == "start_select" {
-                    if let serenity::model::application::ComponentInteractionDataKind::StringSelect { values } = &component.data.kind {
+                let custom_id = &component.data.custom_id;
+                if let serenity::model::application::ComponentInteractionDataKind::StringSelect { values } = &component.data.kind {
+                    if let Some(selected_uuid) = values.first() {
                         component.defer_ephemeral(&ctx.http).await.unwrap();
 
-                        if let Some(selected_uuid) = values.first() {
-                            info!("セレクトメニューよりサービス起動リクエストを受信。対象UUID: {}", selected_uuid);
-                            
+                        if custom_id == "start_select" {
                             let start_url = format!("{}/api/v1/services/{}/start", cfg.coolify_url, selected_uuid);
-                            info!("Coolifyへサービス起動リクエスト(GET)送信。URL: {}", start_url);
-                            
                             let start_res = client.get(&start_url).header("Authorization", &auth_header).send().await;
 
                             match start_res {
                                 Ok(res) => {
                                     let status = res.status();
-                                    let body_text = res.text().await.unwrap_or_else(|_| "ボディの読み込みに失敗".to_string());
-
                                     if status.is_success() {
-                                        info!("サービス UUID: {} の起動リクエスト送信成功。レスポンス: {}", selected_uuid, body_text);
                                         let _ = component.edit_response(&ctx.http, EditInteractionResponse::new()
-                                            .content(format!("▶️ **サービス (UUID: `{}`) の起動リクエストを受理しました！ (タスクがキューに追加されました)**", selected_uuid))
+                                            .content(format!("▶️ **サービス (UUID: `{}`) の起動リクエストを受理しました。**", selected_uuid))
                                             .components(vec![])
                                         ).await;
                                     } else {
-                                        error!("サービス UUID: {} の起動に失敗。ステータス: {}, レスポンス: {}", selected_uuid, status, body_text);
-                                        let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ サービスの起動に失敗しました。Coolify側のログを確認してください。")).await;
+                                        let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ サービスの起動に失敗しました。")).await;
                                     }
                                 }
-                                Err(e) => {
-                                    error!("サービス UUID: {} の起動通信エラー: {:?}", selected_uuid, e);
-                                    let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ 通信エラーにより起動に失敗しました。")).await;
+                                Err(_) => { let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ 通信エラーが発生しました。")).await; }
+                            }
+                        }
+
+                        else if custom_id == "stop_select" {
+                            let stop_url = format!("{}/api/v1/services/{}/stop", cfg.coolify_url, selected_uuid);
+                            let stop_res = client.get(&stop_url).header("Authorization", &auth_header).send().await;
+
+                            match stop_res {
+                                Ok(res) => {
+                                    let status = res.status();
+                                    if status.is_success() {
+                                        let _ = component.edit_response(&ctx.http, EditInteractionResponse::new()
+                                            .content(format!("🛑 **サービス (UUID: `{}`) の停止リクエストを受理しました。**", selected_uuid))
+                                            .components(vec![])
+                                        ).await;
+                                    } else {
+                                        let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ サービスの停止に失敗しました。")).await;
+                                    }
                                 }
+                                Err(_) => { let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ 通信エラーが発生しました。")).await; }
+                            }
+                        }
+
+                        else if custom_id == "delete_select" {
+                            let delete_url = format!("{}/api/v1/services/{}", cfg.coolify_url, selected_uuid);
+                            let delete_res = client.delete(&delete_url).header("Authorization", &auth_header).send().await;
+
+                            match delete_res {
+                                Ok(res) => {
+                                    let status = res.status();
+                                    if status.is_success() {
+                                        let _ = component.edit_response(&ctx.http, EditInteractionResponse::new()
+                                            .content(format!("🗑️ **サービス (UUID: `{}`) を完全に削除しました。**", selected_uuid))
+                                            .components(vec![])
+                                        ).await;
+                                    } else {
+                                        let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ サービスの削除に失敗しました。")).await;
+                                    }
+                                }
+                                Err(_) => { let _ = component.edit_response(&ctx.http, EditInteractionResponse::new().content("❌ 通信エラーが発生しました。")).await; }
                             }
                         }
                     }
@@ -350,9 +420,11 @@ impl EventHandler for Handler {
         
         let deploy_cmd = CreateCommand::new("deploy").description("Basis Serverをポート自動スライドで新規デプロイします");
         let start_cmd = CreateCommand::new("start").description("既存のBasis Serverを選択して起動（スタート）します");
+        let stop_cmd = CreateCommand::new("stop").description("稼働中のBasis Serverを選択して停止します");
+        let delete_cmd = CreateCommand::new("delete").description("既存のBasis Serverを選択して完全に削除します");
 
         info!("グローバルスラッシュコマンドを登録中...");
-        match Command::set_global_commands(&ctx.http, vec![deploy_cmd, start_cmd]).await {
+        match Command::set_global_commands(&ctx.http, vec![deploy_cmd, start_cmd, stop_cmd, delete_cmd]).await {
             Ok(_) => info!("グローバルスラッシュコマンドの登録に成功しました。"),
             Err(e) => error!("グローバルスラッシュコマンドの登録に失敗しました: {:?}", e),
         }
