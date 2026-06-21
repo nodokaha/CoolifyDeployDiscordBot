@@ -9,20 +9,17 @@ use serenity::model::gateway::Ready;
 use serenity::prelude::*;
 use std::env;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-
-// tracing のマクロをインポート
 use tracing::{info, warn, error, instrument};
 
-// 設定を保持する構造体
 struct Config {
     coolify_url: String,
     api_token: String,
     project_uuid: String,
     environment_name: String,
     server_uuid: String,
+    destination_uuid: String,
 }
 
-// 起動時に環境変数を一括チェックする関数
 fn load_config() -> Config {
     Config {
         coolify_url: env::var("COOLIFY_URL").expect("環境変数 'COOLIFY_URL' が設定されていません"),
@@ -30,6 +27,7 @@ fn load_config() -> Config {
         project_uuid: env::var("COOLIFY_PROJECT_UUID").expect("環境変数 'COOLIFY_PROJECT_UUID' が設定されていません"),
         environment_name: env::var("COOLIFY_ENVIRONMENT_NAME").unwrap_or_else(|_| "production".to_string()),
         server_uuid: env::var("COOLIFY_SERVER_UUID").expect("環境変数 'COOLIFY_SERVER_UUID' が設定されていません"),
+        destination_uuid: env::var("COOLIFY_DESTINATION_UUID").expect("環境変数 'COOLIFY_DESTINATION_UUID' が設定されていません"),
     }
 }
 
@@ -82,7 +80,6 @@ services:
 
 struct Handler;
 
-// ポートずらし用に既存のサービス件数をカウントする関数
 async fn get_port_offset(client: &reqwest::Client, url: &str, auth_header: &str) -> i32 {
     info!(target: "coolify_api", "Coolifyから既存サービス一覧を取得中... URL: {}", url);
     let res = client.get(url).header("Authorization", auth_header).send().await;
@@ -120,7 +117,6 @@ impl EventHandler for Handler {
         let auth_header = format!("Bearer {}", cfg.api_token);
 
         match interaction {
-            // ==================== 1. スラッシュコマンド ====================
             Interaction::Command(command) => {
                 let user_name = &command.user.name;
                 let command_name = &command.data.name;
@@ -150,7 +146,6 @@ impl EventHandler for Handler {
                         return;
                     }
 
-                    // サービス一覧（/services）を取得して選択肢を構築
                     let url = format!("{}/api/v1/services", cfg.coolify_url);
                     let res = client.get(&url).header("Authorization", &auth_header).send().await;
 
@@ -201,7 +196,6 @@ impl EventHandler for Handler {
                 }
             }
 
-            // ==================== 2. モーダル送信時の処理 (新規デプロイ) ====================
             Interaction::Modal(modal) => {
                 let user_name = &modal.user.name;
                 info!("モーダル送信を受信: custom_id={} (送信者: {})", modal.data.custom_id, user_name);
@@ -233,11 +227,8 @@ impl EventHandler for Handler {
                         .replace("${PROM_PORT}", &current_prom_port.to_string())
                         .replace("${DASHBOARD_PORT}", &current_dashboard_port.to_string());
 
-                    // Docker ComposeのテキストをBase64化
                     let base64_compose = STANDARD.encode(final_compose.trim());
-
                     let app_name = format!("basis-server-{}", current_set_port);
-
                     let create_url = format!("{}/api/v1/services", cfg.coolify_url);
                     info!("Coolifyへサービス作成リクエスト送信(Base64化)。URL: {}", create_url);
 
@@ -247,6 +238,7 @@ impl EventHandler for Handler {
                             "name": app_name,
                             "project_uuid": cfg.project_uuid,
                             "server_uuid": cfg.server_uuid,
+                            "destination_uuid": cfg.destination_uuid,
                             "environment_name": cfg.environment_name,
                             "docker_compose_raw": base64_compose 
                         }))
@@ -263,7 +255,6 @@ impl EventHandler for Handler {
                                     let service_uuid = app_data["uuid"].as_str().unwrap_or_default();
                                     info!("Coolifyへのサービス登録成功。生成UUID: {}", service_uuid);
 
-                                    // 環境変数登録のパス: /services/{uuid}/envs
                                     let env_url = format!("{}/api/v1/services/{}/envs", cfg.coolify_url, service_uuid);
                                     info!("環境変数 'Password' を登録中... URL: {}", env_url);
                                     
@@ -284,7 +275,6 @@ impl EventHandler for Handler {
                                         info!("環境変数登録ステータス: {}, レスポンス: {}", e_status, e_body);
                                     }
 
-                                    // 初期デプロイをキック
                                     info!("サービスのデプロイメントを開始します。UUID: {}", service_uuid);
                                     let deploy_url = format!("{}/api/v1/services/{}/deploy", cfg.coolify_url, service_uuid);
                                     let _ = client.post(&deploy_url).header("Authorization", &auth_header).send().await;
@@ -313,7 +303,6 @@ impl EventHandler for Handler {
                 }
             }
 
-            // ==================== 3. ドロップダウン選択時の処理 (スタート実行) ====================
             Interaction::Component(component) => {
                 if component.data.custom_id == "start_select" {
                     if let serenity::model::application::ComponentInteractionDataKind::StringSelect { values } = &component.data.kind {
@@ -322,7 +311,6 @@ impl EventHandler for Handler {
                         if let Some(selected_uuid) = values.first() {
                             info!("セレクトメニューよりサービス起動リクエストを受信。対象UUID: {}", selected_uuid);
                             
-                            // ⭕ 最新公式ドキュメント仕様の通り、/start に対して GET リクエストを送信
                             let start_url = format!("{}/api/v1/services/{}/start", cfg.coolify_url, selected_uuid);
                             info!("Coolifyへサービス起動リクエスト(GET)送信。URL: {}", start_url);
                             
@@ -373,11 +361,9 @@ impl EventHandler for Handler {
 
 #[tokio::main]
 async fn main() {
-    // ログ環境変数のデフォルトフォールバック設定 (unsafe 回避)
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    // ログトレーサーの初期化
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .init();
