@@ -33,6 +33,7 @@ fn load_config() -> Config {
 
 const BASE_SET_PORT: i32 = 4296;
 const BASE_HEALTH_PORT: i32 = 10666;
+const BASE_API_PORT: i32 = 10667;
 const BASE_PROM_PORT: i32 = 1234;
 const BASE_DASHBOARD_PORT: i32 = 4000;
 
@@ -54,6 +55,7 @@ services:
     ports:
       - '${SET_PORT}:${SET_PORT}/udp'
       - '${HEALTH_PORT}:${HEALTH_PORT}/tcp'
+      - '${API_PORT}:${API_PORT}/tcp'
       - '${PROM_PORT}:${PROM_PORT}/tcp'
       - '${DASHBOARD_PORT}:${DASHBOARD_PORT}/tcp'
     volumes:
@@ -74,6 +76,8 @@ services:
     environment:
       PORT: ${DASHBOARD_PORT}
       HEALTH_PORT: ${HEALTH_PORT}
+      API_URL_BASE: 'http://localhost:${API_PORT}'
+      API_BEARER_TOKEN: ${DASHBOARD_API_TOKEN}
     depends_on:
       basis-server:
         condition: service_healthy
@@ -88,7 +92,7 @@ async fn get_port_offset(client: &reqwest::Client, url: &str, auth_header: &str)
         Ok(response) => {
             let status = response.status();
             let body_text = response.text().await.unwrap_or_else(|_| "ボディの読み込みに失敗".to_string());
-            
+
             if status.is_success() {
                 if let Ok(services) = serde_json::from_str::<serde_json::Value>(&body_text) {
                     if let Some(services_array) = services.as_array() {
@@ -169,15 +173,26 @@ impl EventHandler for Handler {
                     .placeholder("パスワードを入力してください")
                     .required(true);
 
+                    let api_token_input = CreateInputText::new(
+                        InputTextStyle::Short,
+                        "ダッシュボード用トークン (DASHBOARD_API_TOKEN)",
+                        "dashboard_api_token",
+                    )
+                    .placeholder("トークンを入力してください")
+                    .required(true);
+
                     let modal = CreateModal::new("deploy_modal", "Basis Server 自動デプロイ設定")
-                        .components(vec![CreateActionRow::InputText(password_input)]);
+                        .components(vec![
+                            CreateActionRow::InputText(password_input),
+                            CreateActionRow::InputText(api_token_input),
+                        ]);
 
                     let response = CreateInteractionResponse::Modal(modal);
                     if let Err(e) = command.create_response(&ctx.http, response).await {
                         error!("モーダル送信エラー: {:?}", e);
                     }
                 }
-                
+
                 else if command_name == "start" {
                     if let Err(e) = command.defer_ephemeral(&ctx.http).await {
                         error!("defer_ephemeral エラー: {:?}", e);
@@ -244,10 +259,14 @@ impl EventHandler for Handler {
                     modal.defer_ephemeral(&ctx.http).await.unwrap();
 
                     let mut admin_password = String::new();
+                    let mut dashboard_api_token = String::new();
+                    
                     for row in &modal.data.components {
                         if let ActionRowComponent::InputText(input) = &row.components[0] {
                             if input.custom_id == "admin_password" {
                                 admin_password = input.value.clone().unwrap_or_default();
+                            } else if input.custom_id == "dashboard_api_token" {
+                                dashboard_api_token = input.value.clone().unwrap_or_default();
                             }
                         }
                     }
@@ -256,16 +275,19 @@ impl EventHandler for Handler {
                     let offset = get_port_offset(&client, &list_url, &auth_header).await;
                     let current_set_port = BASE_SET_PORT + offset;
                     let current_health_port = BASE_HEALTH_PORT + offset;
+                    let current_api_port = BASE_API_PORT + offset;
                     let current_prom_port = BASE_PROM_PORT + offset;
                     let current_dashboard_port = BASE_DASHBOARD_PORT + offset;
 
-                    info!("新規ポート計算結果 -> SET: {}, HEALTH: {}", current_set_port, current_health_port);
+                    info!("新規ポート計算結果 -> SET: {}, HEALTH: {}, API: {}", current_set_port, current_health_port, current_api_port);
 
                     let final_compose = DOCKER_COMPOSE_TEMPLATE
                         .replace("${SET_PORT}", &current_set_port.to_string())
                         .replace("${HEALTH_PORT}", &current_health_port.to_string())
+                        .replace("${API_PORT}", &current_api_port.to_string())
                         .replace("${PROM_PORT}", &current_prom_port.to_string())
-                        .replace("${DASHBOARD_PORT}", &current_dashboard_port.to_string());
+                        .replace("${DASHBOARD_PORT}", &current_dashboard_port.to_string())
+                        .replace("${DASHBOARD_API_TOKEN}", &dashboard_api_token);
 
                     let base64_compose = STANDARD.encode(final_compose.trim());
                     let app_name = format!("basis-server-{}", current_set_port);
@@ -280,7 +302,7 @@ impl EventHandler for Handler {
                             "server_uuid": cfg.server_uuid,
                             "destination_uuid": cfg.destination_uuid,
                             "environment_name": cfg.environment_name,
-                            "docker_compose_raw": base64_compose 
+                            "docker_compose_raw": base64_compose
                         }))
                         .send()
                         .await;
@@ -297,7 +319,7 @@ impl EventHandler for Handler {
 
                                     let env_url = format!("{}/api/v1/services/{}/envs", cfg.coolify_url, service_uuid);
                                     info!("環境変数 'Password' を登録中... URL: {}", env_url);
-                                    
+
                                     let env_res = client.post(&env_url)
                                         .header("Authorization", &auth_header)
                                         .json(&json!({
@@ -308,7 +330,7 @@ impl EventHandler for Handler {
                                         }))
                                         .send()
                                         .await;
-                                    
+
                                     if let Ok(e_res) = env_res {
                                         let e_status = e_res.status();
                                         let e_body = e_res.text().await.unwrap_or_default();
@@ -324,8 +346,9 @@ impl EventHandler for Handler {
                                          🔹 **設定名称:** `{}`\n\
                                          🔹 **SetPort:** `{}` (UDP)\n\
                                          🔹 **HealthCheckPort:** `{}` (TCP)\n\
+                                         🔹 **API Port:** `{}` (TCP)\n\
                                          🔹 **DashboardPort:** `{}` (TCP)",
-                                        app_name, current_set_port, current_health_port, current_dashboard_port
+                                        app_name, current_set_port, current_health_port, current_api_port, current_dashboard_port
                                     );
                                     let _ = modal.edit_response(&ctx.http, EditInteractionResponse::new().content(msg)).await;
                                     return;
@@ -417,7 +440,7 @@ impl EventHandler for Handler {
 
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("Botが正常に起動しました！ログイン名: {}", ready.user.name);
-        
+
         let deploy_cmd = CreateCommand::new("deploy").description("Basis Serverをポート自動スライドで新規デプロイします");
         let start_cmd = CreateCommand::new("start").description("既存のBasis Serverを選択して起動（スタート）します");
         let stop_cmd = CreateCommand::new("stop").description("稼働中のBasis Serverを選択して停止します");
@@ -447,9 +470,9 @@ async fn main() {
 
     let intents = GatewayIntents::empty();
     let mut client = Client::builder(&token, intents).event_handler(Handler).await.expect("Err");
-    
+
     info!("Discordゲートウェイに接続しています...");
-    if let Err(why) = client.start().await { 
-        error!("Botの実行中にエラーが発生しました: {:?}", why); 
+    if let Err(why) = client.start().await {
+        error!("Botの実行中にエラーが発生しました: {:?}", why);
     }
 }
